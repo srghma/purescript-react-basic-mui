@@ -25,7 +25,7 @@ import Data.Functor.Mu (Mu(..)) as Mu
 import Data.Functor.Mu (roll)
 import Data.List (List(..), fromFoldable, singleton) as List
 import Data.List (List)
-import Data.Map (filterKeys, fromFoldable, keys, lookup, singleton) as Map
+import Data.Map (filterKeys, fromFoldable, keys, lookup, singleton, Map) as Map
 import Data.Map.Internal (keys) as Map.Internal
 import Data.Maybe (Maybe(..), fromMaybe, isJust, maybe)
 import Data.Newtype (unwrap)
@@ -37,6 +37,13 @@ import Data.Tuple (Tuple(..))
 import Matryoshka (cata, cataM)
 import ReadDTS.Instantiation (Property, Type, TypeF(..)) as ReadDTS.Instantiation
 import ReadDTS.Instantiation.Pretty (pprintTypeName)
+import Unsafe.Coerce as Unsafe.Coerce
+import Codegen.TS.Debug as Codegen.TS.Debug
+import Data.Identity as Data.Identity
+import Debug.Trace as Debug.Trace
+import Matryoshka (AlgebraM)
+import Codegen.TS.Module
+import ReadDTS.Instantiation.Pretty as ReadDTS.Instantiation.Pretty
 
 type TsImportPath
   = String
@@ -110,17 +117,21 @@ componentAST :: Component -> M AST.Module
 componentAST component@{ extraDeclarations, inherits, modulePath, propsType: propsType@{ base: { row: base, vars }, generate } } = do
   { fqn, props } <- componentProps component
   let
+    missingFromGenerate :: Array String
     missingFromGenerate = Array.filter (not <<< flip Set.member (Map.keys props)) generate
   when (not <<< Array.null $ missingFromGenerate) do
     throwError $ [ "Properties listed for generation but not found in component props:" <> show missingFromGenerate ]
   let
+    propsNamesFromBase :: Array String
     propsNamesFromBase = Array.fromFoldable <<< Map.keys <<< _.labels <<< unwrap $ base
 
+    missingFromBase :: Array String
     missingFromBase = Array.filter (not <<< flip Set.member (Map.keys props)) propsNamesFromBase
   when (not <<< Array.null $ missingFromBase) do
     throwError $ [ "Properties listed in base row but not found in component props:" <> show missingFromBase ]
   let
     -- | Take only a subset of props using given label set.
+    props' :: Map.Map String { optional :: Boolean, type :: ReadDTS.Instantiation.Type }
     props' = Map.filterKeys ((&&) <$> (not <<< eq "classes") <*> (_ `Array.elem` generate)) props
 
     -- | Create an new "Object" type from them
@@ -128,7 +139,24 @@ componentAST component@{ extraDeclarations, inherits, modulePath, propsType: pro
     obj :: ReadDTS.Instantiation.Type
     obj = roll $ ReadDTS.Instantiation.Object fqn props'
 
-    objInstance = flip runState mempty <<< runExceptT <<< cataM TS.Module.astAlgebra $ obj
+    astAlgebra' ::
+      AlgebraM
+        ComponentAlgebraM
+        ReadDTS.Instantiation.TypeF
+        PossibleType
+    astAlgebra' arg =
+      let _ = Debug.Trace.traceM (ReadDTS.Instantiation.Pretty.pprintTypeName (map (const "hole") arg)) :: Data.Identity.Identity Unit
+          _ = Debug.Trace.traceM (show arg) :: Data.Identity.Identity Unit
+          _ = Debug.Trace.traceM (arg) :: Data.Identity.Identity Unit
+       in TS.Module.astAlgebra arg
+
+    objInstance :: Tuple (Either String TS.Module.PossibleType) (List AST.Union)
+    objInstance = flip runState mempty <<< runExceptT <<< cataM astAlgebra' $ h (obj)
+      where
+            h a = let
+                      _ = Unsafe.Coerce.unsafeCoerce ((Debug.Trace.traceM (show a)) :: Data.Identity.Identity Unit)
+                      _ = Unsafe.Coerce.unsafeCoerce ((Debug.Trace.traceM a) :: Data.Identity.Identity Unit)
+                   in a
   case objInstance of
     Tuple (Right (TS.Module.ProperType (Mu.In (TypeRecord (AST.Row { labels, tail: Nothing }))))) unions -> do
       classes <-
